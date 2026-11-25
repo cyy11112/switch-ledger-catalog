@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://raw.githubusercontent.com/blawar/titledb/master/"
+FORK = "https://raw.githubusercontent.com/borntohonk/titledb/master/"
 TRACKER = "https://raw.githubusercontent.com/codemaverick-hub/switch2-tracker/main/data/games.json"
 WIKIDATA = "https://query.wikidata.org/sparql"
 WIKIDATA_SWITCH2 = """
@@ -34,6 +35,7 @@ SELECT ?game (SAMPLE(?en) AS ?nameEn) (SAMPLE(?zh) AS ?nameZh)
 GROUP BY ?game
 """
 LOCALES = {"US.en": ("US", "en"), "HK.zh": ("HK", "zh"), "JP.ja": ("JP", "ja"), "CN.zh": ("CN", "zh")}
+FORK_LOCALES = {**LOCALES, "SG.en": ("SG", "en")}
 PLATFORMS = {"switch", "switch2", "unknown"}
 FORMATS = {"card", "key-card", "digital", "dlc", "unknown"}
 EDITIONS = {"standard", "switch2-edition", "upgrade-pack", "deluxe", "collectors", "other"}
@@ -87,10 +89,11 @@ def image_url(value):
     return ""
 
 
-def title_rows(file_name, source_dir):
-    region, locale = LOCALES[file_name]
-    raw = (json.loads((source_dir / (file_name + ".json")).read_text(encoding="utf-8-sig"))
-           if source_dir else fetch_json(BASE + file_name + ".json", 128 * MIB))
+def title_rows(file_name, source_dir, fork=False):
+    region, locale = FORK_LOCALES[file_name]
+    prefix = "fork-" if fork else ""
+    raw = (json.loads((source_dir / (prefix + file_name + ".json")).read_text(encoding="utf-8-sig"))
+           if source_dir else fetch_json((FORK if fork else BASE) + file_name + ".json", 128 * MIB))
     if not isinstance(raw, dict) or len(raw) < (50 if region == "CN" else 4000):
         raise ValueError(f"Unexpectedly small TitleDB feed: {file_name}")
     rows = []
@@ -113,7 +116,8 @@ def title_rows(file_name, source_dir):
         elif code.startswith("01") or (when and when < "2025-06-05"):
             platform = "switch"
         game = {"id": "tdb-" + key, "platform": platform, "format": fmt, "edition": edition,
-                "names": {locale: title}, "regions": [region], "nsuid": key, "origin": "titledb"}
+                "names": {locale: title}, "regions": [region], "nsuid": key,
+                "origin": "titledb-fork" if fork else "titledb"}
         for field, value in (("titleId", code), ("releaseDate", when), ("publisher", clean(row.get("publisher"))),
                              ("cover", image_url(row.get("frontBoxArt"))), ("icon", image_url(row.get("iconUrl")))):
             if value:
@@ -122,9 +126,10 @@ def title_rows(file_name, source_dir):
     return rows
 
 
-def titledb(source_dir):
-    with ThreadPoolExecutor(max_workers=len(LOCALES)) as pool:
-        pages = list(pool.map(lambda name: title_rows(name, source_dir), LOCALES))
+def titledb(source_dir, fork=False):
+    locales = FORK_LOCALES if fork else LOCALES
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        pages = list(pool.map(lambda name: title_rows(name, source_dir, fork), locales))
     games = {}
     for row in (row for page in pages for row in page):
         game = games.get(row["id"])
@@ -188,12 +193,14 @@ def reviewed_rows(path, base):
     return reviewed
 
 
-def report_tracker(path, reviewed):
+def report_tracker(path, catalog):
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig")) if path else fetch_json(TRACKER, 4 * MIB)
-        names = {label_key(game["names"].get("en", "")) for game in reviewed.values()}
-        count = sum(1 for row in payload["games"] if isinstance(row.get("title"), str) and label_key(row["title"]) not in names)
-        print(f"Switch 2 Tracker discovery: {count} titles to review against publisher sources; no tracker rows published.")
+        names = {work_name(name) for game in catalog.values()
+                 if game["platform"] == "switch2" and game["format"] != "dlc" for name in game["names"].values()}
+        candidates = {work_name(row["title"]) for row in payload["games"]
+                      if isinstance(row.get("title"), str) and row.get("status") == "r"}
+        print(f"Switch 2 Tracker name check: {len(names & candidates):,} / {len(candidates):,} works marked released matched.")
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Switch 2 Tracker discovery unavailable: {error}", file=sys.stderr)
 
@@ -245,7 +252,110 @@ def discover_switch2(source_file, games, previous):
         return {row["id"]: row for row in previous if row.get("origin") == "wikidata"}
 
 
-def commit_snapshot(output, games):
+def merge_digital(previous, latest):
+    base = {row["id"]: row for row in previous if row.get("origin") in {"titledb", "titledb-fork"}}
+    conflicts = 0
+    for key, row in latest.items():
+        older = base.get(key)
+        if older:
+            if older.get("titleId") and row.get("titleId") and older["titleId"] != row["titleId"]:
+                conflicts += 1
+                continue
+            row = {**older, **row, "names": {**older["names"], **row["names"]},
+                   "regions": sorted(set(older["regions"] + row["regions"]))}
+            if row["platform"] == "unknown":
+                row["platform"], row["edition"] = older["platform"], older["edition"]
+        base[key] = row
+    if conflicts:
+        print(f"Retained {conflicts} established SKUs with conflicting upstream Title IDs.", file=sys.stderr)
+    return base
+
+
+def work_name(name):
+    text = unicodedata.normalize("NFKC", name.replace("™", "").replace("®", ""))
+    text = re.split(r"nintendo\s*switch\s*2\s*edition", text, maxsplit=1, flags=re.I)[0]
+    return label_key(text)
+
+
+def work_groups(rows):
+    """Estimate distinct games without changing catalog IDs or merging their releases."""
+    rows = [row for row in rows if row["format"] != "dlc" and row["edition"] != "upgrade-pack"]
+    roots = list(range(len(rows)))
+    names = {}
+
+    def root(index):
+        while roots[index] != index:
+            roots[index] = roots[roots[index]]
+            index = roots[index]
+        return index
+
+    for i, row in enumerate(rows):
+        keys = [("name", work_name(n)) for n in row["names"].values()]
+        if row.get("titleId"):
+            keys.append(("title", row["titleId"]))
+        for key in keys:
+            if len(key[1]) < 2:
+                continue
+            linked = names.setdefault(key, i)
+            roots[root(i)] = root(linked)
+    result = defaultdict(list)
+    for i, row in enumerate(rows):
+        result[root(i)].append(row)
+    return list(result.values())
+
+
+def platform_stats(rows):
+    output = {}
+    for platform in ("switch", "switch2"):
+        platform_rows = [row for row in rows if row["platform"] == platform]
+        physical = [row for row in platform_rows if row["format"] in ("card", "key-card")]
+        output[platform] = {"works": len(work_groups(platform_rows)), "retail": len(physical),
+                            "covers": sum(bool(row.get("cover")) for row in physical)}
+    return output
+
+
+def source_info(previous):
+    old = {row["id"]: row for row in previous}
+    definitions = [
+        ("titledb-fork", "TitleDB 活跃分支", "https://github.com/borntohonk/titledb",
+         "borntohonk/titledb", "US.en.json"),
+        ("titledb", "TitleDB 历史底库", "https://github.com/blawar/titledb",
+         "blawar/titledb", "US.en.json"),
+        ("tracker", "Switch 2 Tracker 核查", "https://github.com/codemaverick-hub/switch2-tracker",
+         "codemaverick-hub/switch2-tracker", "data/games.json"),
+        ("scrapper", "eShop 地区交叉核查", "https://github.com/dev-chin/eshopScrapper",
+         "dev-chin/eshopScrapper", "output/main_regions_alt.json"),
+        ("wikidata", "Wikidata 平台资料", "https://www.wikidata.org/wiki/Q122761124", "", ""),
+        ("reviewed", "任天堂产品资料核实", "https://www.nintendo.com/zh-hans-hk/games/switch2/lineup", "", ""),
+    ]
+    items = []
+    for key, name, url, repo, path in definitions:
+        updated = old.get(key, {}).get("updated", "")
+        if repo:
+            try:
+                api = "https://api.github.com/repos/" + repo + "/commits?" + urlencode({"path": path, "per_page": 1})
+                updated = fetch_json(api, 1 * MIB)[0]["commit"]["committer"]["date"]
+            except (OSError, ValueError, IndexError, KeyError, TypeError):
+                pass
+        items.append({"id": key, "name": name, "url": url, "updated": updated})
+    return items
+
+
+def recent_records(previous, games):
+    old = {row["id"] for row in previous.get("games", [])}
+    dated = [row for row in games.values() if row["platform"] == "switch2" and row.get("releaseDate") and row["id"] not in old]
+    changed = []
+    for group in work_groups(dated):
+        row = min(group, key=lambda row: (row["format"] == "unknown", row["id"]))
+        changed.append({"id": row["id"], "releaseDate": row["releaseDate"]})
+    today = date.today()
+    changed.sort(key=lambda row: (date.fromisoformat(row["releaseDate"]) > today,
+                                  abs((date.fromisoformat(row["releaseDate"]) - today).days), row["id"]))
+    earlier = previous.get("summary", {}).get("recent", [])
+    return list({row["id"]: row for row in changed + [row for row in earlier if row["id"] in games]}.values())[:25]
+
+
+def commit_snapshot(output, games, summary=None):
     previous = json.loads(output.read_text(encoding="utf-8")) if output.exists() else None
     rows = sorted(games.values(), key=lambda row: row["id"])
     ids = {row["id"] for row in rows}
@@ -259,10 +369,12 @@ def commit_snapshot(output, games):
         overlap = sum(row["id"] in ids for row in previous["games"])
         if overlap < .92 * len(previous["games"]):
             raise ValueError("Source lost more than 8% of the previous catalog; previous snapshot kept.")
-        if rows == previous["games"]:
+        if rows == previous["games"] and (summary is None or summary == previous.get("summary")):
             return False
     document = {"schemaVersion": 1, "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "games": rows}
+    if summary is not None:
+        document["summary"] = summary
     content = (json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     if len(content) > CATALOG_LIMIT:
         raise ValueError("Catalog exceeds the app's 48 MiB feed limit")
@@ -283,20 +395,29 @@ def report_changes(previous, games, written):
     changed = sum(old_id in games and row != games[old_id] for old_id, row in baseline.items())
     removed = sum(old_id not in games for old_id in baseline)
     switch2 = [row for row in added if row["platform"] == "switch2"]
+    known_switch2 = [row for row in previous if row["platform"] == "switch2"]
+    originals = {row["id"] for row in known_switch2}
+    new_works = [group for group in work_groups(known_switch2 + switch2)
+                 if not any(row["id"] in originals for row in group)]
     summary = [
         "## Catalog update",
         "",
         f"- Rows: {len(games):,}",
         f"- Added: {len(added):,} ({len(switch2):,} Switch 2)",
+        f"- Newly represented Switch 2 works (estimated, DLC excluded): {len(new_works):,}",
         f"- Changed: {changed:,}",
         f"- No longer in source: {removed:,}",
         f"- Snapshot: {'updated' if written else 'unchanged'}",
     ]
     if added:
         summary.append(f"- New records by source: {dict(Counter(row['origin'] for row in added))}")
-    if switch2:
+    if new_works:
         summary.extend(["", "Examples of new Switch 2 records", ""])
-        for row in sorted(switch2, key=lambda row: row.get("releaseDate", ""), reverse=True)[:12]:
+        examples = [max(group, key=lambda row: row.get("releaseDate", "")) for group in new_works]
+        today = date.today().isoformat()
+        released = sorted((row for row in examples if row.get("releaseDate", "") <= today),
+                          key=lambda row: row.get("releaseDate", ""), reverse=True)
+        for row in (released or examples)[:12]:
             names = row["names"]
             title = names.get("en") or names.get("zh") or names.get("ja")
             summary.append(f"- {title} ({row['id']}) {row.get('releaseDate', '')}".rstrip())
@@ -310,20 +431,37 @@ def report_changes(previous, games, written):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", type=Path, help="Use already downloaded TitleDB JSON for a reproducible build")
+    parser.add_argument("--fork-dir", type=Path, help="Use captured fork-REGION.json inputs for a reproducible build")
+    parser.add_argument("--skip-source-revisions", action="store_true", help="Keep already recorded source revision dates")
     parser.add_argument("--tracker-file", type=Path, help="Previously downloaded tracker feed for discovery checks")
     parser.add_argument("--skip-tracker", action="store_true")
     parser.add_argument("--wikidata-file", type=Path, help="Use a captured Wikidata Query Service response")
     parser.add_argument("--verified", type=Path, default=ROOT / "catalog" / "verified-games.json")
     parser.add_argument("--output", type=Path, default=ROOT / "catalog" / "games.json")
     args = parser.parse_args()
-    previous = json.loads(args.output.read_text(encoding="utf-8"))["games"] if args.output.exists() else []
-    base = titledb(args.source_dir)
+    previous_document = json.loads(args.output.read_text(encoding="utf-8")) if args.output.exists() else {}
+    previous = previous_document.get("games", [])
+    try:
+        latest = titledb(args.fork_dir, fork=True)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        if not previous:
+            latest = titledb(args.source_dir)
+        else:
+            latest = {}
+            print(f"TitleDB fork unavailable; retained last successful digital records: {error}", file=sys.stderr)
+    base = merge_digital(previous, latest)
     reviewed = reviewed_rows(args.verified, base)
-    if not args.skip_tracker:
-        report_tracker(args.tracker_file, reviewed)
-    games = {**base, **reviewed}
+    games = {**{row["id"]: row for row in previous}, **base, **reviewed}
     games.update(discover_switch2(args.wikidata_file, games, previous))
-    report_changes(previous, games, commit_snapshot(args.output, games))
+    if not args.skip_tracker:
+        report_tracker(args.tracker_file, games)
+    old_sources = previous_document.get("summary", {}).get("sources", [])
+    summary = {
+        "platforms": platform_stats(list(games.values())),
+        "sources": old_sources if args.skip_source_revisions else source_info(old_sources),
+        "recent": recent_records(previous_document, games),
+    }
+    report_changes(previous, games, commit_snapshot(args.output, games, summary))
 
 
 if __name__ == "__main__":

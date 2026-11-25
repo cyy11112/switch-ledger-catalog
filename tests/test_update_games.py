@@ -67,6 +67,27 @@ class CatalogBuildTests(unittest.TestCase):
         with patch.object(update_games, "fetch_json", side_effect=OSError("offline")):
             self.assertEqual(update_games.discover_switch2(None, base, list(added.values())), added)
 
+    def test_active_fork_updates_languages_without_discarding_established_ids(self):
+        old = {"id": "tdb-old", "platform": "switch2", "format": "digital", "edition": "standard",
+               "names": {"en": "Test Game"}, "regions": ["US"], "titleId": "0400245021D2C000", "origin": "titledb"}
+        new = {**old, "names": {"zh": "測試遊戲"}, "regions": ["HK"], "origin": "titledb-fork"}
+        stale = {**old, "id": "tdb-stale"}
+        result = update_games.merge_digital([old, stale], {"tdb-old": new})
+        self.assertEqual(set(result), {"tdb-old", "tdb-stale"})
+        self.assertEqual(result["tdb-old"]["regions"], ["HK", "US"])
+        self.assertEqual(result["tdb-old"]["names"], {"en": "Test Game", "zh": "測試遊戲"})
+        conflict = {**new, "titleId": "0400123456780000"}
+        self.assertEqual(update_games.merge_digital([old], {"tdb-old": conflict})["tdb-old"], old)
+
+    def test_independent_count_excludes_dlc_and_collapses_regional_skus(self):
+        game = {"id": "digital-us", "platform": "switch2", "format": "digital", "edition": "standard",
+                "names": {"en": "The Game"}, "titleId": "0400245021D2C000"}
+        duplicate = {**game, "id": "digital-hk", "names": {"zh": "這個遊戲"}}
+        card = {**game, "id": "boxed-hk", "format": "card", "cover": "covers/test.webp"}
+        dlc = {**game, "id": "dlc", "format": "dlc", "names": {"en": "Test Season Pass"}}
+        self.assertEqual(update_games.platform_stats([game, duplicate, card, dlc])["switch2"],
+                         {"works": 1, "retail": 1, "covers": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

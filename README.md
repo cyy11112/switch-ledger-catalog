@@ -1,12 +1,10 @@
 # 掌机账本公共游戏目录
 
-本仓库发布供掌机账本读取的公共 Nintendo Switch / Switch 2 游戏资料。
-数据入口是 [catalog/games.json](catalog/games.json)，每天香港时间 11:17 由 GitHub Actions 检查更新。
-每次运行的 Summary 会记录新增、变更和保留记录数量。只有资料有变化才写入新快照。
+[公开目录](catalog/games.json)每天香港时间 11:17 检查新资料。工作流报告新增地区 SKU、新收录的 Switch 2 作品、来源版本及变更情况。
 
-- [TitleDB](https://github.com/blawar/titledb) 提供公开地区 SKU 元数据，使用 [MIT 许可证](catalog/licenses/titledb.txt)。
-- [Wikidata](https://www.wikidata.org/wiki/Wikidata:Data_access/en) 提供 CC0 的 Switch 2 平台声明和可核实的发行日期。介质和地区缺少信息时标为未核实。
-- [Switch 2 Tracker](https://github.com/codemaverick-hub/switch2-tracker) 提供用于人工核查的候选。个别已核实版本及来源保存在 catalog/verified-games.json。
-- 图片引用由原权利人提供。以 covers/ 开头的路径指向 APP 内置参考图。
+- [borntohonk/titledb](https://github.com/borntohonk/titledb) 提供持续更新的美、港、日、中、新加坡区 eShop 资料。原 [TitleDB](https://github.com/blawar/titledb) 的已收录 SKU 继续保留。两者的相同 [MIT 许可声明](catalog/licenses/titledb.txt) 随目录发布。
+- [Wikidata](https://www.wikidata.org/wiki/Wikidata:Data_access/en) 提供 CC0 的 Switch 2 平台资料。缺少商品介质或地区时保留未核实状态。
+- [Switch 2 Tracker](https://github.com/codemaverick-hub/switch2-tracker) 与 [eshopScrapper](https://github.com/dev-chin/eshopScrapper) 用于覆盖率核查。任天堂商品页用于核实特定地区的包装与发行日期。
+- 目录保存受原权利人管理的图片引用。应用已有的参考包装图片使用 covers/ 本地路径。
 
-本仓库只包含公共目录、构建脚本及相关测试。校验通过后工作流才提交快照。
+独立作品统计合并相同游戏的地区 SKU，并排除显式 DLC 和升级包。应用购买和心愿保留选定的具体版本 ID。源文件下载失败时沿用已确认的资料。

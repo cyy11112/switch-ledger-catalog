@@ -27,8 +27,15 @@ def verify_catalog(root=ROOT):
     if set(indexed) != PUBLIC_FILES:
         raise ValueError(f"Unexpected publication paths: {sorted(set(indexed) ^ PUBLIC_FILES)}")
     catalog = json.loads((root / "catalog" / "games.json").read_text(encoding="utf-8"))
-    if set(catalog) != {"schemaVersion", "generatedAt", "games"} or catalog["schemaVersion"] != 1:
+    expected = {"schemaVersion", "generatedAt", "games"}
+    if set(catalog) not in (expected, expected | {"summary"}) or catalog["schemaVersion"] != 1:
         raise ValueError("Unexpected publication schema")
+    if "summary" in catalog:
+        summary = catalog["summary"]
+        if set(summary) != {"platforms", "sources", "recent"} or any(
+            set(row) != {"id", "name", "url", "updated"} for row in summary["sources"]
+        ) or any(set(row) != {"id", "releaseDate"} for row in summary["recent"]):
+            raise ValueError("Unexpected public catalog summary")
     verified = json.loads((root / "catalog" / "verified-games.json").read_text(encoding="utf-8"))
     for rows in (catalog["games"], verified):
         if not isinstance(rows, list) or not rows:
