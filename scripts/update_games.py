@@ -171,6 +171,14 @@ def reviewed_rows(path, base):
     reviewed = {}
     for row in rows:
         game = dict(row)
+        if "medium" in game and (game["medium"] != "boxed-code" or game["format"] != "unknown"):
+            raise ValueError(f"Invalid retail medium: {game['id']}")
+        if game.get("verified") is True:
+            if game.get("format") not in ("card", "key-card") and game.get("medium") != "boxed-code":
+                raise ValueError(f"Verified retail release has no retail medium: {game['id']}")
+            source = urlsplit(game.get("sourceUrl", ""))
+            if source.scheme != "https" or not source.hostname or game.get("regions") in (None, [], ["ZZ"]):
+                raise ValueError(f"Verified retail release lacks regional evidence: {game['id']}")
         supplement = base.get("tdb-" + game.get("nsuid", ""))
         if supplement:
             if supplement["platform"] not in ("unknown", game["platform"]):
@@ -201,6 +209,15 @@ def report_tracker(path, catalog):
         candidates = {work_name(row["title"]) for row in payload["games"]
                       if isinstance(row.get("title"), str) and row.get("status") == "r"}
         print(f"Switch 2 Tracker name check: {len(names & candidates):,} / {len(candidates):,} works marked released matched.")
+        retail = defaultdict(set)
+        for row in payload["games"]:
+            if row.get("status") == "r" and isinstance(row.get("title"), str):
+                formats = row.get("formats") or {}
+                for code in set(formats.values()) | {row.get("fmt")}:
+                    if code in ("c", "k", "b"):
+                        retail[code].add(work_name(row["title"]))
+        print(f"Switch 2 Tracker retail leads (review required): {len(retail['c']):,} card, "
+              f"{len(retail['k']):,} key card, {len(retail['b']):,} boxed code.")
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Switch 2 Tracker discovery unavailable: {error}", file=sys.stderr)
 
@@ -308,8 +325,14 @@ def platform_stats(rows):
     output = {}
     for platform in ("switch", "switch2"):
         platform_rows = [row for row in rows if row["platform"] == platform]
-        physical = [row for row in platform_rows if row["format"] in ("card", "key-card")]
-        output[platform] = {"works": len(work_groups(platform_rows)), "retail": len(physical),
+        physical = [row for row in platform_rows if row.get("origin") == "reviewed" and row.get("verified") is not False
+                    and row.get("medium", row["format"]) in ("card", "key-card", "boxed-code")]
+        counts = Counter(row.get("medium", row["format"]) for row in physical)
+        groups = work_groups(platform_rows)
+        cartridge_ids = {row["id"] for row in physical if row["format"] in ("card", "key-card")}
+        output[platform] = {"works": len(groups), "retail": len(physical),
+                            "retailWorks": sum(any(row["id"] in cartridge_ids for row in group) for group in groups),
+                            "card": counts["card"], "keyCard": counts["key-card"], "boxedCode": counts["boxed-code"],
                             "covers": sum(bool(row.get("cover")) for row in physical)}
     return output
 
@@ -327,6 +350,8 @@ def source_info(previous):
          "dev-chin/eshopScrapper", "output/main_regions_alt.json"),
         ("wikidata", "Wikidata 平台资料", "https://www.wikidata.org/wiki/Q122761124", "", ""),
         ("reviewed", "任天堂产品资料核实", "https://www.nintendo.com/zh-hans-hk/games/switch2/lineup", "", ""),
+        ("publisher-retail", "发行商实体商品资料", "https://www.cyberpunk.net/en/news/51566/cyberpunk-2077-ultimate-edition-is-out-on-nintendo-switch-2", "", ""),
+        ("retailer-retail", "零售商品规格核实", "https://www.bestbuy.com/product/split-fiction-standard-edition-nintendo-switch-2/6631377", "", ""),
     ]
     items = []
     for key, name, url, repo, path in definitions:

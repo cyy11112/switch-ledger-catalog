@@ -18,7 +18,7 @@ PUBLIC_FILES = {
 }
 PUBLIC_FIELDS = {
     "id", "platform", "format", "edition", "names", "regions", "nsuid", "titleId", "productCode",
-    "origin", "releaseDate", "publisher", "cover", "icon", "aliases", "sourceUrl",
+    "origin", "releaseDate", "publisher", "cover", "icon", "aliases", "sourceUrl", "medium", "verified",
 }
 
 

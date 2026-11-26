@@ -83,10 +83,14 @@ class CatalogBuildTests(unittest.TestCase):
         game = {"id": "digital-us", "platform": "switch2", "format": "digital", "edition": "standard",
                 "names": {"en": "The Game"}, "titleId": "0400245021D2C000"}
         duplicate = {**game, "id": "digital-hk", "names": {"zh": "這個遊戲"}}
-        card = {**game, "id": "boxed-hk", "format": "card", "cover": "covers/test.webp"}
+        card = {**game, "id": "boxed-hk", "format": "card", "cover": "covers/test.webp", "origin": "reviewed"}
+        key_card = {**card, "id": "key-jp", "format": "key-card"}
+        code = {**card, "id": "code-us", "format": "unknown", "medium": "boxed-code", "cover": None}
+        unverified = {**card, "id": "unverified", "verified": False}
         dlc = {**game, "id": "dlc", "format": "dlc", "names": {"en": "Test Season Pass"}}
-        self.assertEqual(update_games.platform_stats([game, duplicate, card, dlc])["switch2"],
-                         {"works": 1, "retail": 1, "covers": 1})
+        self.assertEqual(update_games.platform_stats([game, duplicate, card, key_card, code, unverified, dlc])["switch2"],
+                         {"works": 1, "retail": 3, "covers": 2, "retailWorks": 1,
+                          "card": 1, "keyCard": 1, "boxedCode": 1})
 
 
 if __name__ == "__main__":
